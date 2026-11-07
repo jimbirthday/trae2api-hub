@@ -2380,29 +2380,44 @@ class AccountPool(object):
     def preview_import_rows(self, rows, realm=None, overwrite=False):
         rows, error = _coerce_account_rows(rows)
         if error:
-            return {"error": error, "accounts": []}
-        out, errors = [], []
+            return {"error": error, "accounts": [], "added": [], "updated": [],
+                    "skipped": [], "invalid": [{"uid": "-", "reason": error}]}
+        added, updated, skipped, invalid = [], [], [], []
+        errors = []
         existing = {a.uid for a in self.accounts}
         for index, row in enumerate(rows, start=1):
             try:
                 data = normalise_import_row(row, realm=realm)
                 account = Account(data, directory=self.dir)
             except Exception as exc:
-                errors.append("#%d: %s" % (index, exc))
+                reason = str(exc)
+                errors.append("#%d: %s" % (index, reason))
+                invalid.append({"uid": "#%d" % index, "reason": reason})
                 continue
             account.uid = _safe_uid(account.uid)
             preview = account.public()
-            preview["action"] = ("update" if account.uid in existing else "add") \
-                if overwrite or account.uid not in existing else "skip"
-            out.append(preview)
-        return {"total": len(rows), "accounts": out, "errors": errors,
+            if account.uid not in existing:
+                preview["action"] = "add"
+                added.append(preview)
+            elif overwrite:
+                preview["action"] = "update"
+                updated.append(preview)
+            else:
+                preview["action"] = "skip"
+                preview["reason"] = "已存在同 UID 账号（勾选覆盖可更新）"
+                skipped.append(preview)
+        return {"total": len(rows), "added": added, "updated": updated,
+                "skipped": skipped, "invalid": invalid,
+                "accounts": added + updated + skipped, "errors": errors,
                 "overwrite": bool(overwrite)}
 
     def import_rows(self, rows, realm=None, overwrite=False):
         rows, error = _coerce_account_rows(rows)
         if error:
-            return {"imported": 0, "updated": 0, "skipped": 0, "errors": [error]}
-        imported = updated = skipped = 0
+            return {"total": 0, "imported": 0, "added": [], "updated": [],
+                    "skipped": [], "invalid": [{"uid": "-", "reason": error}],
+                    "errors": [error]}
+        added, updated, skipped, invalid = [], [], [], []
         errors = []
         for index, row in enumerate(rows, start=1):
             try:
@@ -2410,11 +2425,14 @@ class AccountPool(object):
                 account = Account(data, directory=self.dir)
                 account.uid = _safe_uid(account.uid)
             except Exception as exc:
-                errors.append("#%d: %s" % (index, exc))
+                reason = str(exc)
+                errors.append("#%d: %s" % (index, reason))
+                invalid.append({"uid": "#%d" % index, "reason": reason})
                 continue
             existing = self.get(account.uid)
             if existing is not None and not overwrite:
-                skipped += 1
+                skipped.append({"uid": account.public()["uid"],
+                                "reason": "已存在同 UID 账号"})
                 continue
             if existing is not None:
                 project = ("token", "refresh_token", "expired_at",
@@ -2426,15 +2444,16 @@ class AccountPool(object):
                     if value not in (None, "", [], {}):
                         setattr(existing, field, value)
                 existing.save(self.dir)
-                updated += 1
+                updated.append(existing.public())
             else:
                 self.add(account)
-                imported += 1
+                added.append(account.public())
         if errors:
             for line in errors[:5]:
                 self.log("导入错误 %s" % line, level="WARN")
-        return {"imported": imported, "updated": updated,
-                "skipped": skipped, "errors": errors}
+        return {"total": len(rows), "imported": len(added), "added": added,
+                "updated": updated, "skipped": skipped, "invalid": invalid,
+                "errors": errors}
 
     def export_document(self, realm=None, include_secrets=True, uids=None):
         return build_export_document(self.by_realm(realm), realm=None,
